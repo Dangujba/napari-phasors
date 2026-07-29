@@ -1,0 +1,14 @@
+name: napari-phasors
+version: 0.7.0
+channels:
+  - conda-forge
+conda_default_channels:
+  - conda-forge
+specs:
+  - python=3.12
+  - napari
+  - pyqt6
+  - pip
+  - napari-phasors=0.7.0
+post_install: post_install.bat
+license_file: LICENSE.ascii.txt
