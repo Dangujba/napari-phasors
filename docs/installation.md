@@ -1,0 +1,167 @@
+# Installation
+
+napari-phasors can be installed in several ways depending on your experience level. Choose the option that best fits your needs.
+
+- Python 3.12, 3.13 or 3.14
+- A working Qt backend. **PyQt6 is highly recommended.**
+  > [!IMPORTANT]
+  > PySide6 is currently known to cause segmentation faults and UI instability on some systems. Please install `pyqt6` for the best experience.
+
+---
+
+## Option 1: napari's built-in plugin manager (easiest)
+
+If you already have [napari](https://napari.org) installed, this is the simplest way:
+
+1. Open napari
+2. Go to **Plugins → Install/Uninstall Plugins...**
+3. Search for **napari-phasors**
+4. Click **Install**
+5. Restart napari
+
+That's it, no terminal or command line needed.
+
+```{note}
+If you don't have napari yet, see [Option 2](#option-2-using-conda--pip-recommended) to install both napari and napari-phasors together.
+```
+
+---
+
+## Option 2: Using conda + pip (recommended)
+
+This is the recommended method for most users. It creates an isolated
+environment so napari-phasors won't interfere with other software on your
+computer.
+
+### Step 1: Install miniforge
+
+Download and install [miniforge](https://conda-forge.org/download/) for your
+operating system. Miniforge provides the `mamba` package manager.
+
+```{tip}
+- **Windows**: After installing, open **Miniforge Prompt** from the Start menu.
+- **macOS**: Open **Terminal** (found in Applications → Utilities).
+- **Linux**: Open any terminal application.
+```
+
+If you already have Anaconda or Miniconda, you can use `conda` instead of
+`mamba` in all commands below.
+
+### Step 2: Create an environment
+
+```bash
+mamba create -y -n napari-phasors-env napari pyqt6 python=3.14 # or 3.12, 3.13
+```
+
+```{tip}
+napari-phasors is also published on the
+[conda-forge](https://anaconda.org/conda-forge/napari-phasors) channel. That
+recipe pulls in napari, PyQt6, and every other dependency, so you can
+replace Steps 2 and 4 with a single command and skip `pip` entirely:
+
+    mamba create -y -n napari-phasors-env -c conda-forge napari-phasors
+
+The conda-forge release can lag a little behind the version on PyPI; use
+the pip steps below if you need the very latest release right away.
+```
+
+### Step 3: Activate the environment
+
+```bash
+conda activate napari-phasors-env
+```
+
+```{important}
+You need to activate the environment **every time** you open a new terminal
+before using napari-phasors.
+```
+
+### Step 4: Install napari-phasors
+
+```bash
+pip install napari-phasors
+```
+
+### Step 5: Launch
+
+```bash
+napari
+```
+
+Then find the plugin under **Plugins → napari-phasors**.
+
+---
+
+## Option 3: Standalone installer (no Python required)
+
+Pre-built installers for Windows, macOS, and Linux are
+available on the
+[latest release](https://github.com/napari-phasors/napari-phasors/releases/latest)
+page. Download the installer for your platform, run it,
+and you're ready to go, no Python installation needed.
+
+| Platform  | File type | How to install                             |
+|-----------|-----------|--------------------------------------------|
+| Windows   | `.exe`    | Double-click to install                    |
+| macOS     | `.dmg`    | Open and drag to Applications              |
+| Linux     | `.sh`     | Run `bash napari-phasors-*.sh` in terminal |
+
+```{tip}
+Installers are ~350–470 MB because they bundle
+Python, napari, and all dependencies, nothing else
+to install.
+```
+
+```{note}
+Standalone installers are generated automatically for
+each release. If no installer is available for the
+latest version yet, use Option 1 or 2.
+```
+
+---
+
+## Updating
+
+To update to the latest version:
+
+```bash
+conda activate napari-phasors-env
+pip install --upgrade napari-phasors
+```
+
+Or through napari's plugin manager: **Plugins → Install/Uninstall Plugins...**
+→ click **Update** next to napari-phasors.
+
+---
+
+## Development installation
+
+For contributors who want to modify the code:
+
+```bash
+git clone https://github.com/napari-phasors/napari-phasors.git
+cd napari-phasors
+pip install -e ".[testing]"
+```
+
+### Pre-commit hooks
+
+The project uses [pre-commit](https://pre-commit.com/) to enforce **black**,
+**isort**, and **ruff** on every commit:
+
+```bash
+pip install pre-commit
+pre-commit install
+```
+
+### Running tests
+
+```bash
+pytest src/napari_phasors/_tests/
+```
+
+Or in parallel:
+
+```bash
+pytest src/napari_phasors/_tests/ -n auto
+```

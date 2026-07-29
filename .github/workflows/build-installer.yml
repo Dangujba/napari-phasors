@@ -1,0 +1,335 @@
+name: Build standalone installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: >-
+          Optional. Release tag to build installers for and attach them
+          to (e.g. v0.7.0). The tag must already exist as a published
+          GitHub release, and its version must already be on conda-forge
+          (run this after the napari-phasors feedstock update has merged).
+          Leave empty to build from the current branch against the latest
+          napari-phasors release on conda-forge; the installers are then
+          only uploaded as workflow artifacts and no release is touched.
+        required: false
+        type: string
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build-installer:
+    name: Build installer (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    permissions:
+      contents: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: linux
+            post_install: post_install.sh
+          - os: macos-14
+            platform: macos
+            post_install: post_install.sh
+          - os: windows-latest
+            platform: windows
+            post_install: post_install.bat
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+
+      - name: Set up Miniforge
+        uses: conda-incubator/setup-miniconda@v3
+        with:
+          miniforge-version: latest
+
+      - name: Install constructor
+        shell: bash -el {0}
+        run: |
+          conda install -y constructor pillow
+
+      - name: Determine version
+        id: version
+        shell: bash -el {0}
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+          # The installer bundles napari-phasors itself rather than pip
+          # installing it, so every buildable version must exist on
+          # conda-forge. Resolve against the channel up front so a missing
+          # version fails here with a clear message instead of deep inside
+          # constructor's solver.
+          # conda search returns one record per build, so de-duplicate and
+          # sort with conda's own version ordering rather than trusting the
+          # order packages come back in.
+          AVAILABLE=$(
+            conda search -c conda-forge --override-channels --json napari-phasors \
+              | python -c "
+          import json, sys
+          from conda.models.version import VersionOrder
+          records = json.load(sys.stdin)['napari-phasors']
+          print(' '.join(sorted({r['version'] for r in records}, key=VersionOrder)))
+          "
+          )
+          echo "Available on conda-forge: ${AVAILABLE}"
+          if [ -n "${TAG}" ]; then
+            VERSION="${TAG#v}"
+            if ! printf '%s\n' ${AVAILABLE} | grep -qx "${VERSION}"; then
+              echo "::error::napari-phasors ${VERSION} (tag ${TAG}) is not on conda-forge, so it cannot be bundled. Available: ${AVAILABLE}"
+              exit 1
+            fi
+            echo "Building version ${VERSION} from tag ${TAG}"
+          else
+            VERSION="${AVAILABLE##* }"
+            echo "No tag supplied - building latest conda-forge release ${VERSION}"
+          fi
+          echo "version=${VERSION}" >> $GITHUB_OUTPUT
+
+      - name: Generate construct.yaml and build
+        shell: bash -el {0}
+        run: |
+          cd installer
+          python - <<'PY'
+          import unicodedata
+          from pathlib import Path
+
+          source = Path("../LICENSE")
+          target = Path("LICENSE.ascii.txt")
+          text = source.read_text(encoding="utf-8")
+          ascii_text = (
+              unicodedata.normalize("NFKD", text)
+              .encode("ascii", "ignore")
+              .decode("ascii")
+          )
+          target.write_text(ascii_text, encoding="ascii")
+          PY
+          cat > construct.yaml <<'ENDOFYAML'
+          name: napari-phasors
+          version: VERSION_PLACEHOLDER
+          channels:
+            - conda-forge
+          conda_default_channels:
+            - conda-forge
+          specs:
+            - python=3.12
+            - napari
+            - pyqt6
+            - pip
+            - napari-phasors=VERSION_PLACEHOLDER
+          post_install: POST_INSTALL_PLACEHOLDER
+          license_file: LICENSE.ascii.txt
+          ENDOFYAML
+          # YAML literal block scalar (|) already strips leading
+          # indentation, so the heredoc content is at column 0.
+          sed -i.bak "s/VERSION_PLACEHOLDER/${{ steps.version.outputs.version }}/" construct.yaml
+          sed -i.bak "s/POST_INSTALL_PLACEHOLDER/${{ matrix.post_install }}/" construct.yaml
+          if [ -f icon.png ]; then
+            python -c "from PIL import Image; img = Image.open('icon.png'); img.save('icon.ico', format='ICO'); img.save('app.icns', format='ICNS')"
+            echo "icon_image: icon.png" >> construct.yaml
+            echo "extra_files:" >> construct.yaml
+            echo "  - icon.png" >> construct.yaml
+            echo "  - icon.ico" >> construct.yaml
+            echo "  - app.icns" >> construct.yaml
+            echo "Found icon.png — adding icon_image and extra_files to construct.yaml"
+          else
+            echo "No icon.png found — skipping icon_image"
+          fi
+          echo "=== construct.yaml ==="
+          cat construct.yaml
+          echo "=== Building ==="
+          constructor .
+
+      - name: List outputs
+        shell: bash -el {0}
+        run: ls -la installer/napari-phasors-*
+
+      # Install the built .sh and launch napari through the generated
+      # launcher under Xvfb, exactly like a user's desktop entry would
+      # (real xcb platform plugin, no terminal attached). This catches
+      # "installer builds fine but the app never opens" regressions,
+      # which are otherwise invisible until someone tests on real Linux.
+      - name: Smoke test Linux installer
+        if: matrix.platform == 'linux'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          sudo apt-get update -y >/dev/null
+          sudo apt-get install -y xvfb >/dev/null
+          SH_INSTALLER=( installer/napari-phasors-*.sh )
+          if [[ ${#SH_INSTALLER[@]} -ne 1 ]]; then
+            echo "ERROR: Expected exactly one .sh installer, found: ${SH_INSTALLER[*]}"
+            exit 1
+          fi
+          INSTALL_DIR="${RUNNER_TEMP}/smoke-install"
+          echo "=== Installing ==="
+          bash "${SH_INSTALLER[0]}" -b -p "${INSTALL_DIR}"
+          echo "=== Import test ==="
+          QT_QPA_PLATFORM=offscreen "${INSTALL_DIR}/bin/python" \
+            -c "import napari, napari_phasors; print('imports OK')"
+          echo "=== Launcher test (xcb under Xvfb) ==="
+          STATUS=0
+          xvfb-run -a "${INSTALL_DIR}/napari-phasors" --info || STATUS=$?
+          echo "=== Launch log ==="
+          cat "${INSTALL_DIR}/last-launch.log" 2>/dev/null || echo "(no log written)"
+          if [ "${STATUS}" -ne 0 ]; then
+            echo "ERROR: launcher exited with status ${STATUS}"
+            exit "${STATUS}"
+          fi
+
+      - name: Create macOS DMG
+        if: matrix.platform == 'macos'
+        shell: bash -el {0}
+        run: |
+          set -euo pipefail
+          VERSION="${{ steps.version.outputs.version }}"
+          SH_INSTALLER=( installer/napari-phasors-*.sh )
+          if [[ ${#SH_INSTALLER[@]} -ne 1 ]]; then
+            echo "ERROR: Expected exactly one .sh installer, found: ${SH_INSTALLER[*]}"
+            exit 1
+          fi
+          SH_INSTALLER="${SH_INSTALLER[0]}"
+          INSTALL_DIR="${RUNNER_TEMP}/napari-phasors-install"
+          DMG_CONTENTS="${RUNNER_TEMP}/dmg-contents"
+          APP_DIR="${DMG_CONTENTS}/napari-phasors.app"
+
+          echo "=== Running .sh installer silently ==="
+          bash "${SH_INSTALLER}" -b -p "${INSTALL_DIR}"
+
+          echo "=== Creating .app bundle ==="
+          mkdir -p "${APP_DIR}/Contents/MacOS"
+          mkdir -p "${APP_DIR}/Contents/Resources"
+
+          cat > "${APP_DIR}/Contents/Info.plist" << PLIST
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+            <dict>
+              <key>CFBundleName</key>
+              <string>napari-phasors</string>
+              <key>CFBundleExecutable</key>
+              <string>napari-phasors</string>
+              <key>CFBundleIdentifier</key>
+              <string>org.napari-phasors.app</string>
+              <key>CFBundleVersion</key>
+              <string>${VERSION}</string>
+              <key>CFBundlePackageType</key>
+              <string>APPL</string>
+              <key>CFBundleShortVersionString</key>
+              <string>${VERSION}</string>
+              <key>CFBundleIconFile</key>
+              <string>app.icns</string>
+            </dict>
+          </plist>
+          PLIST
+
+          cat > "${APP_DIR}/Contents/MacOS/napari-phasors" << 'LAUNCHER'
+          #!/bin/bash
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          ENV_DIR="$(cd "${SCRIPT_DIR}/../Resources/env" && pwd)"
+          # NOTE: constructor envs do not ship bin/activate (no conda inside),
+          # so we export what napari/Qt need directly instead of activating.
+          export PATH="${ENV_DIR}/bin:${PATH}"
+          export CONDA_PREFIX="${ENV_DIR}"
+          # Conda bakes the build-time install prefix into the env, so Qt's
+          # compiled-in plugin path points at a directory that no longer
+          # exists once the .app is moved (into the bundle at build time,
+          # then into /Applications by the user). Point Qt at the bundled
+          # plugins explicitly — env vars override the baked-in path.
+          for PLUGIN_DIR in "${ENV_DIR}/lib/qt6/plugins" "${ENV_DIR}/lib/qt/plugins" "${ENV_DIR}/plugins"; do
+            if [ -d "${PLUGIN_DIR}/platforms" ]; then
+              export QT_PLUGIN_PATH="${PLUGIN_DIR}"
+              export QT_QPA_PLATFORM_PLUGIN_PATH="${PLUGIN_DIR}/platforms"
+              break
+            fi
+          done
+          export FONTCONFIG_PATH="${ENV_DIR}/etc/fonts"
+          exec "${ENV_DIR}/bin/python" -m napari "$@"
+          LAUNCHER
+          chmod +x "${APP_DIR}/Contents/MacOS/napari-phasors"
+
+          echo "=== Moving conda env into .app bundle ==="
+          mv "${INSTALL_DIR}" "${APP_DIR}/Contents/Resources/env"
+
+          # If the installer shipped an app.icns at the install root, copy it
+          # into the .app Resources so the app has an icon.
+          if [ -f "${APP_DIR}/Contents/Resources/env/app.icns" ]; then
+            cp "${APP_DIR}/Contents/Resources/env/app.icns" "${APP_DIR}/Contents/Resources/app.icns"
+          fi
+          echo "=== Fixing shebangs in bundled env ==="
+          ENV_BIN="${APP_DIR}/Contents/Resources/env/bin"
+          # prefer a specific python binary if present
+          if [ -x "${ENV_BIN}/python3.12" ]; then
+            PY_BIN="${ENV_BIN}/python3.12"
+          elif [ -x "${ENV_BIN}/python3" ]; then
+            PY_BIN="${ENV_BIN}/python3"
+          else
+            PY_BIN="${ENV_BIN}/python"
+          fi
+          # Rewrite python shebangs to point to the env python safely
+          if [ -d "${ENV_BIN}" ]; then
+            python3 -c '
+          import os, sys
+          env_bin = sys.argv[1]
+          py_bin = sys.argv[2]
+          for filename in os.listdir(env_bin):
+              filepath = os.path.join(env_bin, filename)
+              if not os.path.isfile(filepath) or os.path.islink(filepath):
+                  continue
+              try:
+                  with open(filepath, "rb") as f:
+                      first_line = f.readline()
+                  if first_line.startswith(b"#!") and b"python" in first_line.lower():
+                      with open(filepath, "rb") as f:
+                          content = f.read()
+                      newline_pos = content.find(b"\n")
+                      new_first_line = b"#!" + py_bin.encode("utf-8") + b"\n"
+                      new_content = new_first_line + content[newline_pos+1:] if newline_pos != -1 else new_first_line
+                      with open(filepath, "wb") as f:
+                          f.write(new_content)
+              except Exception as e:
+                  print(f"Skipping {filepath}: {e}")
+          ' "${ENV_BIN}" "${PY_BIN}"
+            chmod -R +x "${ENV_BIN}" || true
+          fi
+          # Remove absolute 'home' entries in pyvenv.cfg if present
+          PVF="${APP_DIR}/Contents/Resources/env/pyvenv.cfg"
+          if [ -f "$PVF" ]; then
+            sed -i.bak '/^home = /d' "$PVF" || true
+            rm -f "$PVF.bak" || true
+          fi
+
+
+          ln -s /Applications "${DMG_CONTENTS}/Applications"
+
+          echo "=== Creating DMG ==="
+          ARCH="$(uname -m)"
+          hdiutil create \
+            -volname "napari-phasors" \
+            -srcfolder "${DMG_CONTENTS}" \
+            -ov \
+            -format UDZO \
+            "installer/napari-phasors-${VERSION}-macOS-${ARCH}.dmg"
+
+          rm -f "${SH_INSTALLER}"
+          echo "=== DMG created ==="
+          ls -la installer/napari-phasors-*
+
+      - name: Upload installer as artifact
+        uses: actions/upload-artifact@65462800fd760344b1a7b4382951275a0abb4808 # v4.3.3
+        with:
+          name: installer-${{ matrix.platform }}
+          path: installer/napari-phasors-*
+          if-no-files-found: error
+
+      - name: Upload to GitHub Release
+        if: inputs.tag != ''
+        uses: softprops/action-gh-release@4fabdc8bec0ad32a2eb09fb8fd1d04fd30a75562 # v2.0.5
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: installer/napari-phasors-*
