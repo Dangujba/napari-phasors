@@ -19,6 +19,22 @@ export CONDA_PREFIX="${DIR}"
 # can crash it on startup.
 unset PYTHONPATH PYTHONHOME
 export PYTHONNOUSERSITE=1
+export QT_API="${QT_API:-pyqt6}"
+
+# Numba's on-disk cache must not live beside the installed modules. System
+# prefixes and macOS app bundles are read-only to normal users; Numba retries
+# temporary-file creation there thousands of times, making startup appear
+# frozen. Always use a per-user cache instead.
+if [ "$(uname)" = "Darwin" ]; then
+    CACHE_ROOT="${HOME}/Library/Caches/napari-phasors"
+else
+    CACHE_ROOT="${XDG_CACHE_HOME:-${HOME}/.cache}/napari-phasors"
+fi
+if ! mkdir -p "${CACHE_ROOT}/numba-cache" 2>/dev/null; then
+    CACHE_ROOT="${TMPDIR:-/tmp}/napari-phasors-${UID:-user}"
+    mkdir -p "${CACHE_ROOT}/numba-cache"
+fi
+export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-${CACHE_ROOT}/numba-cache}"
 for PLUGIN_DIR in "${DIR}/lib/qt6/plugins" "${DIR}/lib/qt/plugins" "${DIR}/plugins"; do
     if [ -d "${PLUGIN_DIR}/platforms" ]; then
         export QT_PLUGIN_PATH="${PLUGIN_DIR}"
@@ -38,11 +54,8 @@ if [ "$(uname)" = "Linux" ]; then
     # error would otherwise be invisible. When not attached to a
     # terminal, keep a log of the last launch attempt.
     if [ ! -t 1 ]; then
-        LOG_FILE="${DIR}/last-launch.log"
-        if ! : > "${LOG_FILE}" 2>/dev/null; then
-            LOG_FILE="${TMPDIR:-/tmp}/napari-phasors-launch.log"
-            : > "${LOG_FILE}" 2>/dev/null || LOG_FILE=/dev/null
-        fi
+        LOG_FILE="${CACHE_ROOT}/last-launch.log"
+        : > "${LOG_FILE}" 2>/dev/null || LOG_FILE=/dev/null
         exec >> "${LOG_FILE}" 2>&1
         echo "napari-phasors launch: $(date)"
     fi

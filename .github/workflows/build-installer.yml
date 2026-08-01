@@ -129,10 +129,11 @@ jobs:
           # indentation, so the heredoc content is at column 0.
           sed -i.bak "s/VERSION_PLACEHOLDER/${{ steps.version.outputs.version }}/" construct.yaml
           sed -i.bak "s/POST_INSTALL_PLACEHOLDER/${{ matrix.post_install }}/" construct.yaml
+          echo "extra_files:" >> construct.yaml
+          echo "  - launch_napari_phasors.pyw" >> construct.yaml
           if [ -f icon.png ]; then
             python -c "from PIL import Image; img = Image.open('icon.png'); img.save('icon.ico', format='ICO'); img.save('app.icns', format='ICNS')"
             echo "icon_image: icon.png" >> construct.yaml
-            echo "extra_files:" >> construct.yaml
             echo "  - icon.png" >> construct.yaml
             echo "  - icon.ico" >> construct.yaml
             echo "  - app.icns" >> construct.yaml
@@ -176,11 +177,60 @@ jobs:
           STATUS=0
           xvfb-run -a "${INSTALL_DIR}/napari-phasors" --info || STATUS=$?
           echo "=== Launch log ==="
-          cat "${INSTALL_DIR}/last-launch.log" 2>/dev/null || echo "(no log written)"
+          cat "${XDG_CACHE_HOME:-${HOME}/.cache}/napari-phasors/last-launch.log" \
+            2>/dev/null || echo "(no log written)"
           if [ "${STATUS}" -ne 0 ]; then
             echo "ERROR: launcher exited with status ${STATUS}"
             exit "${STATUS}"
           fi
+
+      - name: Smoke test Windows installer
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $installers = @(Get-ChildItem installer\napari-phasors-*.exe)
+          if ($installers.Count -ne 1) {
+            throw "Expected exactly one .exe installer, found $($installers.Count)"
+          }
+          $installDir = Join-Path $env:RUNNER_TEMP 'smoke-install'
+          $env:NAPARI_PHASORS_SKIP_SHORTCUTS = '1'
+          $arguments = @(
+            '/S',
+            '/NoRegistry=1',
+            '/NoShortcuts=1',
+            "/D=$installDir"
+          )
+          $process = Start-Process -FilePath $installers[0].FullName `
+            -ArgumentList $arguments -Wait -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Installer exited with code $($process.ExitCode)"
+          }
+
+          $env:NAPARI_PHASORS_LAUNCHER = Join-Path `
+            $installDir 'launch_napari_phasors.pyw'
+          $code = @'
+          import os
+          import runpy
+          import tempfile
+          from pathlib import Path
+
+          launcher_path = Path(os.environ["NAPARI_PHASORS_LAUNCHER"])
+          prefix = launcher_path.parent
+          launcher = runpy.run_path(str(launcher_path))
+          launcher["_configure_environment"]()
+          cache = Path(os.environ["NUMBA_CACHE_DIR"])
+          assert not cache.resolve().is_relative_to(prefix.resolve())
+          with tempfile.NamedTemporaryFile(dir=cache):
+              pass
+          import napari_phasors
+          print("plugin import and writable cache OK")
+          '@
+          & "$installDir\python.exe" -c $code
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & "$installDir\python.exe" `
+            "$installDir\launch_napari_phasors.pyw" --info
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Create macOS DMG
         if: matrix.platform == 'macos'
@@ -236,6 +286,18 @@ jobs:
           # so we export what napari/Qt need directly instead of activating.
           export PATH="${ENV_DIR}/bin:${PATH}"
           export CONDA_PREFIX="${ENV_DIR}"
+          unset PYTHONPATH PYTHONHOME
+          export PYTHONNOUSERSITE=1
+          export QT_API="${QT_API:-pyqt6}"
+          CACHE_ROOT="${HOME}/Library/Caches/napari-phasors"
+          if ! mkdir -p "${CACHE_ROOT}/numba-cache" 2>/dev/null; then
+            CACHE_ROOT="${TMPDIR:-/tmp}/napari-phasors-${UID:-user}"
+            mkdir -p "${CACHE_ROOT}/numba-cache"
+          fi
+          export NUMBA_CACHE_DIR="${NUMBA_CACHE_DIR:-${CACHE_ROOT}/numba-cache}"
+          if [ ! -t 1 ]; then
+            exec >> "${CACHE_ROOT}/last-launch.log" 2>&1
+          fi
           # Conda bakes the build-time install prefix into the env, so Qt's
           # compiled-in plugin path points at a directory that no longer
           # exists once the .app is moved (into the bundle at build time,

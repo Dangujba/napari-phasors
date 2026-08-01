@@ -12,3 +12,5 @@ specs:
   - napari-phasors=0.7.0
 post_install: post_install.bat
 license_file: LICENSE.ascii.txt
+extra_files:
+  - launch_napari_phasors.pyw

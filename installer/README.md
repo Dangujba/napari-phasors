@@ -21,8 +21,16 @@ pass it to constructor via the `icon_image` field.
 
 ### Windows shortcuts
 
-The `post_install.bat` script will also pick up `icon.ico` (if
-present in the install prefix) to set the icon on desktop and
-Start Menu shortcuts. To ship the `.ico`, add it here and copy it
-in the post-install script or embed it via constructor's
-`extra_files`.
+The build workflow converts `icon.png` to `icon.ico` and ships both
+files. The `post_install.bat` script uses the `.ico` for the desktop
+and Start Menu shortcuts.
+
+Windows shortcuts start `launch_napari_phasors.pyw` through the bundled
+`pythonw.exe`, so launching the application does not open a console window.
+The launcher also isolates the bundled Python environment and redirects
+Numba's compiled-code cache to the writable per-user directory
+`%LOCALAPPDATA%\napari-phasors\numba-cache`. This is required for all-user
+installs under `C:\ProgramData`; otherwise Numba repeatedly attempts to write
+inside the read-only installation and napari appears to hang at startup.
+Startup errors are saved to
+`%LOCALAPPDATA%\napari-phasors\last-launch.log`.
